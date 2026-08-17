@@ -82,20 +82,23 @@ vi.mock('./settingsStore', () => ({
     subscribe: vi.fn(() => () => {}),
   },
 }));
+const mockAnalyticsStore = {
+  currentSignal: null as Signal | null,
+  connectionStatus: 'live' as const,
+  setCurrentSignal: vi.fn(),
+  addSignal: vi.fn(),
+  upsertSignal: vi.fn(),
+  recomputeStats: vi.fn(),
+  updateSignalOutcome: vi.fn(),
+  setCalibrationState: vi.fn(),
+  setConnectionStatus: vi.fn(),
+  clearAll: vi.fn(),
+};
+
 vi.mock('./useAnalyticsStore', () => ({
   useAnalyticsStore: {
-    getState: () => ({
-      currentSignal: null,
-      setCurrentSignal: vi.fn(),
-      addSignal: vi.fn(),
-      upsertSignal: vi.fn(),
-      recomputeStats: vi.fn(),
-      updateSignalOutcome: vi.fn(),
-      setCalibrationState: vi.fn(),
-      setConnectionStatus: vi.fn(),
-      clearAll: vi.fn(),
-    }),
-    setState: vi.fn(),
+    getState: () => mockAnalyticsStore,
+    setState: vi.fn((partial: Record<string, unknown>) => Object.assign(mockAnalyticsStore, partial)),
   },
 }));
 
@@ -142,6 +145,11 @@ describe('useTickStore handleCandle — demo account wiring regressions', () => 
     useDemoAccountStore.setState({ autoTradeEnabled: true, stage0Amount: 10, stagePercents: [250, 500, 1000], martingale: {} });
     mockEvaluate.mockReset();
     mockOnCandleClosed.mockReset();
+    mockShouldEmitPreClose.mockReturnValue(true);
+  });
+
+  afterEach(() => {
+    mockShouldEmitPreClose.mockReturnValue(false);
   });
 
   it('confirmEntryPrice fires on the new candle even when isClosed already advanced lastCandleCloseAtMs on the previous candle', () => {
@@ -194,6 +202,10 @@ describe('useTickStore handleCandle — demo account wiring regressions', () => 
     // 0) Simulate pre-close having fired for this candle so the
     //    fallback openTrade path (isClosed=true) is allowed to proceed.
     maybeTriggerPreClose(harness.set, harness.get);
+    // Clear the trade opened by pre-close — we only need preCloseTriggeredCandleTime
+    // to be set so the isClosed=true path can proceed. The test verifies that
+    // intermediate ticks don't open trades and the close path does.
+    useDemoAccountStore.setState({ openTrades: {}, balance: 1000 });
 
     // Промежуточный тик внутри той же свечи (isClosed=false) — evaluate()
     // уже возвращает валидный сигнал (например, порог по score набран

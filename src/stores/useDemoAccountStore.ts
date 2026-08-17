@@ -388,9 +388,10 @@ export const useDemoAccountStore = create<DemoAccountState>()(
 );
 
 export function migrateDemoAccountState(
-  persistedState: LegacyDemoAccountPersistedState,
+  persistedStateRaw: unknown,
   version: number,
 ): DemoAccountPersistedShape {
+  const persistedState = persistedStateRaw as LegacyDemoAccountPersistedState;
   const s: LegacyDemoAccountPersistedState = { ...persistedState };
   if (version < 2) {
     delete s.consecutiveLosses;
@@ -415,6 +416,11 @@ export function migrateDemoAccountState(
         }
       }
     }
+    // v3 data could still carry baseStake instead of stage0Amount
+    if (s.stage0Amount == null && s.baseStake != null) {
+      s.stage0Amount = s.baseStake;
+      delete s.baseStake;
+    }
   }
   return {
     balance: s.balance ?? DEFAULT_BALANCE,
@@ -423,7 +429,7 @@ export function migrateDemoAccountState(
     profitPercent: s.profitPercent ?? DEFAULT_PROFIT_PERCENT,
     autoTradeEnabled: s.autoTradeEnabled ?? true,
     martingale: (s.martingale ?? {}) as Record<InstrumentKey, InstrumentMartingaleState>,
-    openTrades: (s.openTrades ?? {}) as Record<string, unknown>,
+    openTrades: s.openTrades ?? {},
     history: s.history ?? [],
   };
 }

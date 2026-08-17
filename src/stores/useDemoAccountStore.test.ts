@@ -542,15 +542,15 @@ describe('useDemoAccountStore — entry price confirmation', () => {
     useDemoAccountStore.setState({
       balance: 990,
       openTrades: {
-        'sig-confirm-1': makeTrade('sig-confirm-1', 'A', TF, candleTime, 10, 0, 'buy', 0 as unknown as number),
-        'sig-confirm-2': makeTrade('sig-confirm-2', 'A', TF, candleTime, 10, 0, 'sell', 0 as unknown as number),
+        'sig-confirm-1': makeTrade('sig-confirm-1', 'A', TF, candleTime, 10, 0, 'buy', 0),
+        'sig-confirm-2': makeTrade('sig-confirm-2', 'A', TF, candleTime, 10, 0, 'sell', 0),
       },
     });
     // Fix entryPrice to null for the test
     useDemoAccountStore.setState((s) => ({
       openTrades: {
-        'sig-confirm-1': { ...s.openTrades['sig-confirm-1']!, entryPrice: null },
-        'sig-confirm-2': { ...s.openTrades['sig-confirm-2']!, entryPrice: null },
+        'sig-confirm-1': { ...s.openTrades['sig-confirm-1'], entryPrice: null },
+        'sig-confirm-2': { ...s.openTrades['sig-confirm-2'], entryPrice: null },
       },
     }));
 
@@ -665,7 +665,7 @@ describe('useDemoAccountStore — persist migration', () => {
 
     const result = migrateDemoAccountState(v1State, 1);
 
-    expect(result.consecutiveLosses).toBeUndefined();
+    expect((result as { consecutiveLosses?: number }).consecutiveLosses).toBeUndefined();
     expect((result as { currentStake?: number }).currentStake).toBeUndefined();
     expect(result.martingale).toEqual({});
     expect(result.stage0Amount).toBe(10);
@@ -681,7 +681,7 @@ describe('useDemoAccountStore — persist migration', () => {
     const v3State = {
       balance: 500,
       baseStake: 15,
-      stagePercents: [250, 500, 1000],
+      stagePercents: [250, 500, 1000] as [number, number, number],
       profitPercent: 80,
       autoTradeEnabled: true,
       martingale: {
