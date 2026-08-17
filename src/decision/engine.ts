@@ -1,0 +1,182 @@
+import type {
+  Candle,
+  IndicatorConfig,
+  Signal,
+  SignalOutcome,
+  Snapshot,
+  Timeframe,
+  FeatureName,
+  Tick,
+  SignalComponentToggles,
+} from '@/types/domain';
+import { DEFAULT_SIGNAL_TOGGLES } from '@/types/domain';
+import type { CalibrationModel } from './calibration-model';
+import { buildFullSnapshot } from '@/compute/full-snapshot';
+import {
+  buildSignal,
+  type BuildSignalParams,
+} from './signal-builder';
+import { addBreadcrumb } from '@/lib/sentry';
+import { TIMEFRAME_SECONDS } from '@/data/symbols';
+import { PRE_CLOSE_SIGNAL_LEAD_MS } from '@/lib/constants';
+
+const DEFAULT_BARS_TO_RESOLVE = 5;
+const DEFAULT_SCORE_THRESHOLD = 2;
+const FROZEN_SIGNAL_MAX_AGE_MS = 60_000;
+
+export interface OutcomeRecord {
+  signalId: string;
+  outcome: SignalOutcome;
+  features: number[];
+  score: number;
+}
+
+export interface DecisionEngineOptions {
+  calibration: CalibrationModel | null;
+  barsToResolve: number;
+  scoreThreshold?: number;
+  signalToggles?: SignalComponentToggles;
+}
+
+export class DecisionEngine {
+  private calibration: CalibrationModel | null;
+  private barsToResolve: number;
+  private scoreThreshold: number;
+  private signalToggles: SignalComponentToggles;
+  private frozenSignal: Signal | null = null;
+  private frozenCandleTime: number | null = null;
+  private currentSignal: Signal | null = null;
+  private currentSnapshot: Snapshot | null = null;
+
+  constructor(opts: DecisionEngineOptions) {
+    this.calibration = opts.calibration;
+    this.barsToResolve = opts.barsToResolve > 0 ? opts.barsToResolve : DEFAULT_BARS_TO_RESOLVE;
+    this.scoreThreshold = opts.scoreThreshold ?? DEFAULT_SCORE_THRESHOLD;
+    this.signalToggles = opts.signalToggles ?? DEFAULT_SIGNAL_TOGGLES;
+  }
+
+  snapshot(candleTime: number, serverNowMs: number, timeframeSeconds: number): { isFrozen: boolean; shouldFreeze: boolean } {
+    const closeTimeMs = (candleTime + timeframeSeconds) * 1000;
+    const msUntilClose = closeTimeMs - serverNowMs;
+    const shouldFreeze = msUntilClose <= PRE_CLOSE_SIGNAL_LEAD_MS && msUntilClose > -PRE_CLOSE_SIGNAL_LEAD_MS;
+    return { isFrozen: this.frozenSignal !== null, shouldFreeze };
+  }
+
+  evaluate(
+    symbolId: string,
+    timeframe: Timeframe,
+    candles: Candle[],
+    config: IndicatorConfig,
+    atrMultiplier: number,
+    activeFeatures: FeatureName[],
+    tick: Tick | null,
+    serverNowMs: number,
+    isClosed: boolean = true,
+  ): Signal | null {
+    if (candles.length === 0) return null;
+    const hasEnabledSource = this.signalToggles.structure || this.signalToggles.zones || this.signalToggles.liquidity || this.signalToggles.trigger || this.signalToggles.indicator || this.signalToggles.bos || this.signalToggles.macd || this.signalToggles.meanReversion;
+    if (!hasEnabledSource) {
+      this.currentSignal = null;
+      this.frozenSignal = null;
+      this.frozenCandleTime = null;
+      return null;
+    }
+    const lastCandle = candles[candles.length - 1];
+    const tfSeconds = TIMEFRAME_SECONDS[timeframe];
+    const { shouldFreeze } = this.snapshot(lastCandle.time, serverNowMs, tfSeconds);
+
+    if (this.frozenSignal && this.frozenCandleTime === lastCandle.time) {
+      const age = serverNowMs - (this.frozenSignal.frozenAt ?? 0);
+      if (age > FROZEN_SIGNAL_MAX_AGE_MS) {
+        this.frozenSignal = null;
+        this.frozenCandleTime = null;
+      } else {
+        return this.frozenSignal;
+      }
+    }
+
+    const { snapshot, series } = buildFullSnapshot(candles, config, activeFeatures, isClosed);
+    void series;
+
+    const signal = buildSignal({
+      symbolId,
+      timeframe,
+      candles,
+      config,
+      atrMultiplier,
+      activeFeatures,
+      snapshot,
+      calibration: this.calibration,
+      tick,
+      barsToResolve: this.barsToResolve,
+      scoreThreshold: this.scoreThreshold,
+      signalToggles: this.signalToggles,
+    } satisfies BuildSignalParams);
+
+    this.currentSignal = signal;
+    this.currentSnapshot = snapshot;
+
+    if (shouldFreeze && signal) {
+      this.frozenSignal = { ...signal, frozenAt: serverNowMs };
+      this.frozenCandleTime = lastCandle.time;
+      return this.frozenSignal;
+    }
+
+    return signal;
+  }
+
+  onCandleClosed(): Signal | null {
+    const sig = this.frozenSignal ?? this.currentSignal;
+    this.frozenSignal = null;
+    this.frozenCandleTime = null;
+    return sig;
+  }
+
+  recordOutcome(signal: Signal, outcome: SignalOutcome): OutcomeRecord | null {
+    if (outcome === 'pending') return null;
+    if (!this.calibration) return null;
+
+    const outcomeValue: 1 | 0 = outcome === 'win' ? 1 : 0;
+    const sample = {
+      features: signal.featureVector,
+      score: signal.score,
+      outcome: outcomeValue,
+    };
+
+    this.calibration.addSample(sample);
+    this.calibration.retrain();
+    addBreadcrumb(`Calibration retrained: ${this.calibration.getSampleCount()} samples`, {
+      outcome,
+      score: signal.score,
+    });
+
+    return {
+      signalId: signal.id,
+      outcome,
+      features: signal.featureVector,
+      score: signal.score,
+    };
+  }
+
+  getFrozenSignal(): Signal | null {
+    return this.frozenSignal;
+  }
+
+  shouldEmitPreClose(serverNowMs: number, candleTime: number, timeframeSeconds: number): boolean {
+    const closeTimeMs = (candleTime + timeframeSeconds) * 1000;
+    const msUntilClose = closeTimeMs - serverNowMs;
+    return msUntilClose <= PRE_CLOSE_SIGNAL_LEAD_MS && msUntilClose > 0;
+  }
+
+  getLastSnapshot(): Snapshot | null {
+    return this.currentSnapshot;
+  }
+
+  setScoreThreshold(threshold: number): void {
+    this.scoreThreshold = threshold;
+  }
+
+  setSignalToggles(toggles: SignalComponentToggles): void {
+    this.signalToggles = toggles;
+  }
+}

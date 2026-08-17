@@ -1,0 +1,328 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import type { Candle, Signal, Timeframe } from '@/types/domain';
+
+const mockEvaluate = vi.fn();
+const mockOnCandleClosed = vi.fn();
+const mockShouldEmitPreClose = vi.fn().mockReturnValue(false);
+const mockGetFrozenSignal = vi.fn().mockReturnValue(null);
+
+vi.mock('@/decision/engine', () => ({
+  DecisionEngine: vi.fn().mockImplementation(() => ({
+    evaluate: mockEvaluate,
+    onCandleClosed: mockOnCandleClosed,
+    shouldEmitPreClose: mockShouldEmitPreClose,
+    getFrozenSignal: mockGetFrozenSignal,
+    recordOutcome: vi.fn().mockReturnValue(null),
+    getLastSnapshot: vi.fn().mockReturnValue(null),
+    setScoreThreshold: vi.fn(),
+    setSignalToggles: vi.fn(),
+  })),
+}));
+
+vi.mock('@/decision/outcome-scheduler', () => ({
+  OutcomeScheduler: vi.fn().mockImplementation(() => ({
+    schedule: vi.fn(),
+    onCandleClosed: vi.fn(),
+    clear: vi.fn(),
+    getPendingCount: vi.fn().mockReturnValue(0),
+  })),
+}));
+
+vi.mock('@/decision/calibration-model', () => ({
+  MIN_SAMPLES: 10,
+  loadCalibrationState: vi.fn().mockReturnValue(null),
+  persistCalibrationState: vi.fn(),
+  CalibrationModel: vi.fn(),
+}));
+
+vi.mock('@/decision/signal-builder', () => ({
+  FEATURE_COUNT: 10,
+  FEATURE_KEYS: [],
+  shouldRevise: vi.fn().mockReturnValue(false),
+  reviseSignal: vi.fn(),
+}));
+
+vi.mock('@/lib/signal-persistence', () => ({
+  saveSignal: vi.fn().mockResolvedValue(undefined),
+  updateSignalOutcome: vi.fn().mockResolvedValue(undefined),
+  loadCalibrationStateFromDb: vi.fn().mockResolvedValue(null),
+  saveCalibrationState: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock('@/lib/audio', () => ({ playSignalAlert: vi.fn(), playPriorityAlert: vi.fn() }));
+vi.mock('@/lib/sentry', () => ({ captureError: vi.fn(), addBreadcrumb: vi.fn() }));
+vi.mock('@/data/server-clock', () => ({ serverClock: { now: vi.fn(() => Date.now()), onTick: vi.fn(() => () => {}) } }));
+vi.mock('@/data/connection-manager', () => ({
+  connectionManager: {
+    onCandle: vi.fn(() => () => {}),
+    onTick: vi.fn(() => () => {}),
+    onStatus: vi.fn(() => () => {}),
+    connectAndGetHistory: vi.fn().mockResolvedValue({ status: 'live', candles: [] }),
+    disconnect: vi.fn(),
+  },
+}));
+vi.mock('@/data/market-hours', () => ({
+  isMarketOpen: vi.fn().mockReturnValue(true),
+  FOREX_MARKET_HOURS: { openDays: [false, true, true, true, true, true, false], openMinutesUtc: 0, closeMinutesUtc: 1440 },
+}));
+vi.mock('@/data/compact-timeline', () => ({ compactTimeline: vi.fn((c: unknown) => c) }));
+vi.mock('@/compute/WorkerClient', () => ({
+  workerClient: { candleClosed: vi.fn().mockResolvedValue({ snapshot: { indicators: {} }, series: {} }), resetStreaming: vi.fn() },
+}));
+vi.mock('@/compute/IndicatorAggregator', () => ({ computeSnapshot: vi.fn() }));
+vi.mock('@/compute/full-snapshot', () => ({ buildFullSnapshot: vi.fn() }));
+vi.mock('./settingsStore', () => ({
+  useSettingsStore: {
+    getState: () => ({
+      indicators: {}, atrMultiplier: 2, priorityThreshold: 0.7,
+      soundPrioritySignal: false, soundNewSignal: false,
+      activePatterns: [], activeIndicators: [], sensitivity: 'soft',
+      signalToggles: {},
+    }),
+    subscribe: vi.fn(() => () => {}),
+  },
+}));
+vi.mock('./useAnalyticsStore', () => ({
+  useAnalyticsStore: {
+    getState: () => ({
+      currentSignal: null,
+      setCurrentSignal: vi.fn(),
+      addSignal: vi.fn(),
+      upsertSignal: vi.fn(),
+      recomputeStats: vi.fn(),
+      updateSignalOutcome: vi.fn(),
+      setCalibrationState: vi.fn(),
+      setConnectionStatus: vi.fn(),
+      clearAll: vi.fn(),
+    }),
+    setState: vi.fn(),
+  },
+}));
+
+// useDemoAccountStore — БЕЗ мока, проверяем реальное поведение стора.
+import { useDemoAccountStore } from '@/stores/useDemoAccountStore';
+import { useAnalyticsStore } from '@/stores/useAnalyticsStore';
+import { handleCandle, maybeTriggerPreClose } from '@/stores/useTickStore';
+
+function candle(time: number, open: number, close: number, high: number, low: number): Candle {
+  return { time, open, high, low, close, volume: 100 };
+}
+
+function makeSignal(overrides: Partial<Signal> & { id: string; time: number }): Signal {
+  return {
+    symbolId: 'A', timeframe: '5m', direction: 'buy', strength: 'moderate',
+    score: 3, calibratedProbability: null, entryPrice: 100, stopLoss: 95,
+    takeProfit: 110, reason: 'test', indicators: {} as unknown as Signal['indicators'],
+    pattern: null, outcome: 'pending', frozenAt: null, isRevised: false,
+    isPreClose: false, revisionNote: null, barsToResolve: 5, spread: null,
+    spreadSource: null, recommendedExpiry: 300, featureVector: [0],
+    ...overrides,
+  };
+}
+
+// Минимальный набор полей TickState, который реально читает handleCandle
+// и функции, которые он вызывает. Тип ослаблен — тесту не нужен полный
+// TickState, только использованные поля.
+function makeTickHarness(initial: Record<string, unknown>) {
+  let state: Record<string, unknown> = {
+    candles: [], activeSymbolId: 'A', activeTimeframe: '5m',
+    lastCandleCloseAtMs: 0, lastCandleUpdatedAt: 0, lastComputeAt: 0,
+    lastTick: null, candleLifecycle: 'live', currentPrice: null,
+    lastTickAt: 0, lastPriceFlash: null, prioritySignal: null,
+    ...initial,
+  };
+  const get = () => state as never;
+  const set = (partial: Record<string, unknown>) => { state = { ...state, ...partial }; };
+  return { get, set };
+}
+
+describe('useTickStore handleCandle — demo account wiring regressions', () => {
+  beforeEach(() => {
+    useDemoAccountStore.getState().resetAccount();
+    useDemoAccountStore.setState({ autoTradeEnabled: true, stage0Amount: 10, stagePercents: [250, 500, 1000], martingale: {} });
+    mockEvaluate.mockReset();
+    mockOnCandleClosed.mockReset();
+  });
+
+  it('confirmEntryPrice fires on the new candle even when isClosed already advanced lastCandleCloseAtMs on the previous candle', () => {
+    const tf: Timeframe = '5m';
+    const tfSeconds = 300;
+    const T = 1_000_000;
+
+    const closedCandle = candle(T, 100, 100, 101, 99);
+    const harness = makeTickHarness({ candles: [closedCandle], activeTimeframe: tf });
+
+    const signal = makeSignal({ id: `A:${tf}:${T}`, time: T, entryPrice: 100 });
+    mockEvaluate.mockReturnValue(signal);
+    mockOnCandleClosed.mockReturnValue(signal);
+
+    // 0) Simulate pre-close having already fired for this candle so the
+    //    fallback openTrade path (isClosed=true) is allowed to proceed.
+    maybeTriggerPreClose(harness.set, harness.get);
+
+    // 1) Последний тик текущей свечи приходит с isClosed=true ДО того, как
+    //    появилась следующая свеча (типичное поведение deriv.ts). Это уже
+    //    продвигает lastCandleCloseAtMs и открывает сделку без известной цены.
+    handleCandle(candle(T, 100, 100, 101, 99), true, harness.set, harness.get);
+
+    const tradeId = signal.id;
+    let trade = useDemoAccountStore.getState().openTrades[tradeId];
+    expect(trade).toBeDefined();
+    expect(trade?.entryPrice).toBeNull(); // цена ещё не подтверждена
+
+    // 2) Приходит первая свеча нового периода — gap-up, open=103.
+    //    lastCandleCloseAtMs у harness уже равен prevCloseMs для этого
+    //    перехода (выставлен шагом 1), поэтому дедуп-гвард НЕ должен
+    //    помешать confirmEntryPrice сработать.
+    handleCandle(candle(T + tfSeconds, 103, 104, 105, 102), false, harness.set, harness.get);
+
+    trade = useDemoAccountStore.getState().openTrades[tradeId];
+    expect(trade?.entryPrice).toBe(103); // подтверждена реальная цена открытия
+  });
+
+  it('does not open a demo trade on an intermediate (isClosed === false) signal, only on the actual close', () => {
+    const tf: Timeframe = '5m';
+    const T = 2_000_000;
+
+    const forming = candle(T, 100, 100, 101, 99);
+    const harness = makeTickHarness({ candles: [forming], activeTimeframe: tf });
+
+    const signal = makeSignal({ id: `A:${tf}:${T}`, time: T, entryPrice: 100 });
+    mockEvaluate.mockReturnValue(signal);
+    mockOnCandleClosed.mockReturnValue(signal);
+
+    // 0) Simulate pre-close having fired for this candle so the
+    //    fallback openTrade path (isClosed=true) is allowed to proceed.
+    maybeTriggerPreClose(harness.set, harness.get);
+
+    // Промежуточный тик внутри той же свечи (isClosed=false) — evaluate()
+    // уже возвращает валидный сигнал (например, порог по score набран
+    // раньше, чем за 5 секунд до закрытия).
+    handleCandle(candle(T, 100, 102, 103, 99), false, harness.set, harness.get);
+
+    expect(Object.keys(useDemoAccountStore.getState().openTrades)).toHaveLength(0);
+
+    // Настоящее закрытие той же свечи — теперь сделка должна открыться.
+    handleCandle(candle(T, 100, 105, 106, 99), true, harness.set, harness.get);
+
+    const trades = useDemoAccountStore.getState().openTrades;
+    expect(Object.keys(trades)).toHaveLength(1);
+    expect(trades[signal.id]).toBeDefined();
+  });
+});
+
+describe('maybeTriggerPreClose — entryPrice regression (Finding #1)', () => {
+  beforeEach(() => {
+    useDemoAccountStore.getState().resetAccount();
+    useDemoAccountStore.setState({ autoTradeEnabled: true, stage0Amount: 10, stagePercents: [250, 500, 1000], martingale: {} });
+    mockEvaluate.mockReset();
+    mockOnCandleClosed.mockReset();
+    mockShouldEmitPreClose.mockReturnValue(true);
+  });
+
+  afterEach(() => {
+    mockShouldEmitPreClose.mockReturnValue(false);
+  });
+
+  it('opens trade with entryPrice === null (not signal.entryPrice) so confirmEntryPrice can correct it later', () => {
+    const tf: Timeframe = '5m';
+    const tfSeconds = 300;
+    const T = 3_000_000;
+
+    // The forming candle has close=102 — this is what signal.entryPrice would be.
+    // The real open of the next candle is 105 (gap up). If the bug were present,
+    // entryPrice would be locked to 102 and confirmEntryPrice could not fix it.
+    const forming = candle(T, 100, 102, 103, 99);
+    const harness = makeTickHarness({ candles: [forming], activeTimeframe: tf });
+
+    const signal = makeSignal({
+      id: `A:${tf}:${T}`,
+      time: T,
+      entryPrice: 102, // signal.entryPrice = close of forming candle
+    });
+    mockEvaluate.mockReturnValue(signal);
+
+    // Simulate pre-close trigger (5s before candle close)
+    maybeTriggerPreClose(harness.set, harness.get);
+
+    const trade = useDemoAccountStore.getState().openTrades[signal.id];
+    expect(trade).toBeDefined();
+    // CRITICAL: entryPrice must be null, NOT 102 — so confirmEntryPrice can
+    // set the real open price when the next candle arrives.
+    expect(trade?.entryPrice).toBeNull();
+    expect(trade?.fallbackEntryPrice).toBe(102);
+
+    // Now the new candle arrives with open=105 — confirmEntryPrice should fire
+    handleCandle(candle(T + tfSeconds, 105, 106, 107, 104), false, harness.set, harness.get);
+
+    const correctedTrade = useDemoAccountStore.getState().openTrades[signal.id];
+    expect(correctedTrade?.entryPrice).toBe(105);
+  });
+
+  it('does not open a second trade for the same signal.id if called again', () => {
+    const tf: Timeframe = '5m';
+    const T = 4_000_000;
+
+    const forming = candle(T, 100, 102, 103, 99);
+    const harness = makeTickHarness({ candles: [forming], activeTimeframe: tf });
+
+    const signal = makeSignal({ id: `A:${tf}:${T}`, time: T, entryPrice: 102 });
+    mockEvaluate.mockReturnValue(signal);
+
+    maybeTriggerPreClose(harness.set, harness.get);
+    const balanceAfterFirst = useDemoAccountStore.getState().balance;
+
+    // Second call — should be deduped by preCloseTriggeredCandleTime guard
+    maybeTriggerPreClose(harness.set, harness.get);
+    const balanceAfterSecond = useDemoAccountStore.getState().balance;
+
+    expect(balanceAfterFirst).toBe(balanceAfterSecond);
+    expect(Object.keys(useDemoAccountStore.getState().openTrades)).toHaveLength(1);
+  });
+});
+
+describe('signal notification gating — intermediate ticks do not update currentSignal', () => {
+  beforeEach(() => {
+    useDemoAccountStore.getState().resetAccount();
+    useDemoAccountStore.setState({ autoTradeEnabled: true, stage0Amount: 10, stagePercents: [250, 500, 1000], martingale: {} });
+    mockEvaluate.mockReset();
+    mockOnCandleClosed.mockReset();
+    mockShouldEmitPreClose.mockReturnValue(false);
+  });
+
+  it('intermediate tick (isClosed=false) does not call setCurrentSignal or play alerts', () => {
+    const tf: Timeframe = '5m';
+    const T = 5_000_000;
+    const forming = candle(T, 100, 100, 101, 99);
+    const harness = makeTickHarness({ candles: [forming], activeTimeframe: tf });
+
+    const signal = makeSignal({ id: `A:${tf}:${T}`, time: T, entryPrice: 100 });
+    mockEvaluate.mockReturnValue(signal);
+
+    const setCurrentSignalMock = (useAnalyticsStore as unknown as { getState: () => { setCurrentSignal: ReturnType<typeof vi.fn> } }).getState().setCurrentSignal;
+    setCurrentSignalMock.mockClear();
+
+    handleCandle(candle(T, 100, 102, 103, 99), false, harness.set, harness.get);
+
+    expect(setCurrentSignalMock).not.toHaveBeenCalled();
+  });
+
+  it('pre-close tick calls setCurrentSignal and plays alerts', () => {
+    const tf: Timeframe = '5m';
+    const T = 6_000_000;
+    const forming = candle(T, 100, 102, 103, 99);
+    const harness = makeTickHarness({ candles: [forming], activeTimeframe: tf });
+
+    const signal = makeSignal({ id: `A:${tf}:${T}`, time: T, entryPrice: 102 });
+    mockEvaluate.mockReturnValue(signal);
+    mockShouldEmitPreClose.mockReturnValue(true);
+
+    const setCurrentSignalMock = (useAnalyticsStore as unknown as { getState: () => { setCurrentSignal: ReturnType<typeof vi.fn> } }).getState().setCurrentSignal;
+    setCurrentSignalMock.mockClear();
+
+    maybeTriggerPreClose(harness.set, harness.get);
+
+    expect(setCurrentSignalMock).toHaveBeenCalledTimes(1);
+    mockShouldEmitPreClose.mockReturnValue(false);
+  });
+});
