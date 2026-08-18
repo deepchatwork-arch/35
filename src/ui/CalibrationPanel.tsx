@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react';
 import { FlaskConical, Loader2, CheckCircle2, AlertCircle, Database, TrendingUp, Table2 } from 'lucide-react';
-import { calibrate } from '@/decision/Calibration';
+import { workerClient } from '@/compute/WorkerClient';
 import { useTickStore } from '@/stores/useTickStore';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { useAnalyticsStore } from '@/stores/useAnalyticsStore';
@@ -60,23 +60,21 @@ export function CalibrationPanel() {
   const buckets = useMemo(() => computeBuckets(signals), [signals]);
   const hasBucketData = buckets.some((b) => b.total > 0);
 
-  const run = () => {
+  const run = async () => {
     if (candles.length < 50 || !symbol) return;
     setError(null);
     setRunning(true);
-    setTimeout(() => {
-      try {
-        const res = calibrate(symbolId, timeframe, candles, indicators, symbol.pipSize);
-        setCalibrationResult(res);
-        if (res.atrMultiplier > 0) {
-          setAtrMultiplier(res.atrMultiplier);
-        }
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Calibration failed');
-      } finally {
-        setRunning(false);
+    try {
+      const res = await workerClient.calibrate(symbolId, timeframe, candles, indicators, symbol.pipSize);
+      setCalibrationResult(res);
+      if (res.atrMultiplier > 0) {
+        setAtrMultiplier(res.atrMultiplier);
       }
-    }, 50);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Calibration failed');
+    } finally {
+      setRunning(false);
+    }
   };
 
   return (
@@ -87,7 +85,7 @@ export function CalibrationPanel() {
           КАЛИБРОВКА
         </div>
         <button
-          onClick={run}
+          onClick={() => void run()}
           disabled={running || candles.length < 50}
           className="flex items-center gap-1 rounded-md bg-secondary-700/30 px-2 py-1 text-2xs font-semibold text-secondary-400 transition hover:bg-secondary-700/50 disabled:opacity-40"
         >

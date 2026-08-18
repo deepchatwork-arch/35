@@ -8,7 +8,6 @@ import { SymbolSelector } from '@/ui/SymbolSelector';
 import { ConnectionStatusBadge } from '@/ui/ConnectionStatusBadge';
 import { ForexHoursIndicator } from '@/ui/ForexHoursIndicator';
 import { PredictionAccuracyBadge } from '@/ui/PredictionAccuracyBadge';
-import { CandleTimer } from '@/ui/CandleTimer';
 import { Boxes } from 'lucide-react';
 import { useState } from 'react';
 import { StrategiesModal } from '@/ui/StrategiesModal';
@@ -58,11 +57,6 @@ export function Header({ onAiAnalyze, aiLoading }: HeaderProps) {
             {tf}
           </button>
         ))}
-      </div>
-
-      {/* Candle timer — desktop only */}
-      <div className="hidden shrink-0 md:block">
-        <CandleTimer />
       </div>
 
       {/* Right cluster: price + badges */}

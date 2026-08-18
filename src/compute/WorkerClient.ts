@@ -1,5 +1,6 @@
 import type {
   Candle,
+  CalibrationResult,
   IndicatorConfig,
   IndicatorSnapshot,
   IndicatorSeries,
@@ -20,6 +21,8 @@ interface PendingRequest {
 }
 
 const REQUEST_TIMEOUT_MS = 3000;
+
+const CALIBRATE_TIMEOUT_MS = 60000;
 
 export class WorkerClient {
   private worker: Worker | null = null;
@@ -56,6 +59,7 @@ export class WorkerClient {
 
   private send<T extends WorkerOutboundMessage>(
     message: WorkerInboundMessage,
+    timeoutMs = REQUEST_TIMEOUT_MS,
   ): Promise<T> {
     const worker = this.ensureWorker();
     const requestId = genRequestId();
@@ -64,7 +68,7 @@ export class WorkerClient {
       const timer = setTimeout(() => {
         this.pending.delete(requestId);
         reject(new Error('worker request timeout'));
-      }, REQUEST_TIMEOUT_MS);
+      }, timeoutMs);
       this.pending.set(requestId, {
         resolve: (msg) => resolve(msg as T),
         reject,
@@ -134,6 +138,28 @@ export class WorkerClient {
   resetStreaming(): void {
     const worker = this.ensureWorker();
     worker.postMessage({ type: 'reset_streaming', requestId: genRequestId() });
+  }
+
+  async calibrate(
+    symbolId: string,
+    timeframe: Timeframe,
+    candles: Candle[],
+    config: IndicatorConfig,
+    pipSize: number,
+  ): Promise<CalibrationResult> {
+    const res = await this.send<Extract<WorkerOutboundMessage, { type: 'calibrate_result' }>>(
+      {
+        type: 'calibrate',
+        requestId: '',
+        symbolId,
+        timeframe,
+        candles,
+        config,
+        pipSize,
+      },
+      CALIBRATE_TIMEOUT_MS,
+    );
+    return res.result;
   }
 
   terminate(): void {

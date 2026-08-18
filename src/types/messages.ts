@@ -1,5 +1,6 @@
 import type {
   Candle,
+  CalibrationResult,
   IndicatorConfig,
   IndicatorSnapshot,
   IndicatorSeries,
@@ -48,6 +49,15 @@ export type WorkerInboundMessage =
   | {
       type: 'reset_streaming';
       requestId: string;
+    }
+  | {
+      type: 'calibrate';
+      requestId: string;
+      symbolId: string;
+      timeframe: Timeframe;
+      candles: Candle[];
+      config: IndicatorConfig;
+      pipSize: number;
     };
 
 // ─── Outbound (worker → main) ─────────────────────────────────────
@@ -69,5 +79,10 @@ export type WorkerOutboundMessage =
       type: 'tick_update_result';
       requestId: string;
       snapshot: IndicatorSnapshot;
+    }
+  | {
+      type: 'calibrate_result';
+      requestId: string;
+      result: CalibrationResult;
     }
   | { type: 'worker_error'; requestId: string; message: string };

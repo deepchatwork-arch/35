@@ -5,7 +5,6 @@ import { useAnalyticsStore } from '@/stores/useAnalyticsStore';
 import { findSymbol } from '@/data/symbols';
 import { formatPrice, formatForexPrice, clsx } from '@/lib/utils';
 import { SymbolSelector } from '@/ui/SymbolSelector';
-import { CandleTimer } from '@/ui/CandleTimer';
 import { PredictionAccuracyBadge } from '@/ui/PredictionAccuracyBadge';
 import { DemoAccountBadge } from '@/ui/DemoAccountBadge';
 import { ConnectionStatusBadge } from '@/ui/ConnectionStatusBadge';
@@ -86,11 +85,6 @@ export function LandscapeControls({ panelsVisible, onTogglePanels, onAiAnalyze, 
                 : formatPrice(currentPrice, symbol.pipSize)
               : '—'}
           </span>
-
-          {/* Candle timer */}
-          <div className="pointer-events-auto hidden sm:block">
-            <CandleTimer />
-          </div>
 
           {/* Prediction accuracy */}
           <div className="pointer-events-auto hidden sm:block">

@@ -3,6 +3,7 @@ import { useTickStore } from '@/stores/useTickStore';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { findSymbol } from '@/data/symbols';
 import { formatPrice, clsx } from '@/lib/utils';
+import { CandleTimer } from '@/ui/CandleTimer';
 
 export function StatusBar() {
   const currentPrice = useTickStore((s) => s.currentPrice);
@@ -34,25 +35,28 @@ export function StatusBar() {
   const ChangeIcon = flash === 'up' ? TrendingUp : flash === 'down' ? TrendingDown : Minus;
 
   return (
-    <div className="flex items-center gap-4 border-t border-base-800 bg-base-950 px-3 py-1.5 text-2xs text-base-400">
-      <span className="flex items-center gap-1">
+    <div className="flex items-center gap-2 border-t border-base-800 bg-base-950 px-3 py-1.5 text-2xs text-base-400 sm:gap-4">
+      <span className="flex shrink-0 items-center gap-1">
         <span className="text-base-500">цена</span>
         <span className={clsx('font-mono tabular-nums', flash === 'up' ? 'text-success-500' : flash === 'down' ? 'text-error-500' : 'text-base-200')}>
           {currentPrice !== null && symbol ? formatPrice(currentPrice, symbol.pipSize) : '—'}
         </span>
       </span>
-      <span className="flex items-center gap-1">
+      <span className="hidden shrink-0 items-center gap-1 sm:flex">
         <ChangeIcon size={11} className={flash === 'up' ? 'text-success-500' : flash === 'down' ? 'text-error-500' : 'text-base-500'} />
         <span className={clsx(flash === 'up' ? 'text-success-500' : flash === 'down' ? 'text-error-500' : 'text-base-500')}>
           {flash === 'up' ? 'рост' : flash === 'down' ? 'падение' : 'стоп'}
         </span>
       </span>
-      <span className="ml-auto flex items-center gap-1">
+      <div className="flex min-w-0 flex-1 justify-center">
+        <CandleTimer />
+      </div>
+      <span className="flex shrink-0 items-center gap-1">
         <span className="text-base-500">свечей</span>
         <span className="font-mono text-base-300">{candleCount}</span>
       </span>
       {marketClosed && (
-        <span className="flex items-center gap-1 text-accent-400">
+        <span className="hidden shrink-0 items-center gap-1 text-accent-400 sm:flex">
           <Clock size={11} />
           Рынок закрыт
         </span>
